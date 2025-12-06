@@ -1,21 +1,23 @@
 package kvsrv
 
 import (
-	"6.5840/kvsrv1/rpc"
-	"6.5840/kvtest1"
-	"6.5840/tester1"
+    "time"
+
+    "6.5840/kvsrv1/rpc"
+    "6.5840/kvtest1"
+    "6.5840/tester1"
 )
 
 
 type Clerk struct {
-	clnt   *tester.Clnt
-	server string
+    clnt   *tester.Clnt
+    server string
 }
 
 func MakeClerk(clnt *tester.Clnt, server string) kvtest.IKVClerk {
-	ck := &Clerk{clnt: clnt, server: server}
-	// You may add code here.
-	return ck
+    ck := &Clerk{clnt: clnt, server: server}
+    // You may add code here.
+    return ck
 }
 
 // Get fetches the current value and version for a key.  It returns
@@ -29,8 +31,25 @@ func MakeClerk(clnt *tester.Clnt, server string) kvtest.IKVClerk {
 // must match the declared types of the RPC handler function's
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
-	// You will have to modify this function.
-	return "", 0, rpc.ErrNoKey
+    // You will have to modify this function.
+    args := rpc.GetArgs{
+        Key: key,
+    }
+    reply := rpc.GetReply{}
+    
+    for {
+        ok := ck.clnt.Call(ck.server, "KVServer.Get", &args, &reply)
+        if ok {
+
+            if reply.Err == rpc.ErrNoKey {
+                return "", 0, rpc.ErrNoKey
+            }
+
+            return reply.Value, reply.Version, reply.Err
+        }
+
+        time.Sleep(100 * time.Millisecond)
+    }
 }
 
 // Put updates key with value only if the version in the
@@ -51,6 +70,34 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 // must match the declared types of the RPC handler function's
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Put(key, value string, version rpc.Tversion) rpc.Err {
-	// You will have to modify this function.
-	return rpc.ErrNoKey
+    // You will have to modify this function.
+    putArgs := rpc.PutArgs{
+        Key: key, 
+        Value: value,
+        Version: version,
+    }
+
+    firstTry := true
+    for {
+        putReply := rpc.PutReply{}
+        ok := ck.clnt.Call(ck.server, "KVServer.Put", &putArgs, &putReply)
+        if ok {
+            if putReply.Err == rpc.OK {
+                return putReply.Err
+            }
+
+            if putReply.Err == rpc.ErrVersion {
+                if firstTry {
+                    return putReply.Err
+                }
+                
+                return rpc.ErrMaybe
+            }
+
+			return putReply.Err
+        }
+
+        firstTry = false
+        time.Sleep(100 * time.Millisecond)
+    }
 }
