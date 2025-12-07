@@ -1,0 +1,40 @@
+Summary notes:
+Linearizability (in this lab): a client that gets a successful response from the server knows that all later reads/writes will observe the effects of that operation, just as if a single-threaded server had processed the requests one at a time.
+
+Lab pieces:
+1. Clerk: wraps RPC calls to the server (`Get`/`Put`), handles retries, and returns `rpc.OK`, `rpc.ErrNoKey`, `rpc.ErrVersion`, or `rpc.ErrMaybe`.
+2. Server (`KVServer`): holds the actual key/value map and enforces linearizability. Each `Put` is a compare-and-swap: it only succeeds if the supplied version matches the server’s current version for that key, at which point the server writes the new value and increments the version. If the versions differ, the server responds with `rpc.ErrVersion`, telling the client that someone else updated the key in between. Because every handler runs under a mutex, the map updates happen atomically.
+
+Example race without a lock:
+```
+ck1 := ts.MakeClerk()
+ck2 := ts.MakeClerk()
+
+val1, v1, _ := ck1.Get("k")   // returns "hey", version 7
+val2, v2, _ := ck2.Get("k")   // also "hey", version 7
+
+ck1.Put("k", "hello", v1)     // succeeds, server stores version 8
+ck2.Put("k", "hi", v2)        // fails with ErrVersion because version 7 is stale
+```
+Linearizability still holds, but without extra coordination the second client must detect `ErrVersion`, re-read, and retry; otherwise its update is lost.
+
+Lock use:
+3. The lock stores ownership in a separate key (e.g., `"myLock"`) so that only one clerk at a time can run a read/modify/write sequence on the shared key. While a client holds the lock, no other client can acquire it, so they are forced to wait and read the latest version after the lock is released. This prevents the simultaneous read that causes `ErrVersion` in the example above.
+
+Sketch:
+```
+lockKey := "myLock"
+lkA := MakeLock(ckA, lockKey) // assigns random owner ID
+lkB := MakeLock(ckB, lockKey)
+
+func worker(lk *Lock, ck kvtest.IKVClerk, key string, newVal string) {
+    lk.Acquire()
+    val, ver, _ := ck.Get(key)
+    ck.Put(key, newVal, ver)
+    lk.Release()
+}
+
+go worker(lkA, ckA, "k", "hello")
+go worker(lkB, ckB, "k", "hi")
+```
+`lkA.Acquire()` succeeds first, so worker A reads the freshest version and writes its update. Worker B can’t enter its `Get` until `lkA` releases, so it always sees the new version and never collides with a stale `Put`.
