@@ -18,6 +18,8 @@ ck2.Put("k", "hi", v2)        // fails with ErrVersion because version 7 is stal
 ```
 Linearizability still holds, but without extra coordination the second client must detect `ErrVersion`, re-read, and retry; otherwise its update is lost.
 
+In src directory, try to provoke data race by running `go test ./kvsrv1/lock -run TestNoLockRaceDemo -v`
+
 Lock use:
 3. The lock stores ownership in a separate key (e.g., `"myLock"`) so that only one clerk at a time can run a read/modify/write sequence on the shared key. While a client holds the lock, no other client can acquire it, so they are forced to wait and read the latest version after the lock is released. This prevents the simultaneous read that causes `ErrVersion` in the example above.
 
@@ -38,3 +40,9 @@ go worker(lkA, ckA, "k", "hello")
 go worker(lkB, ckB, "k", "hi")
 ```
 `lkA.Acquire()` succeeds first, so worker A reads the freshest version and writes its update. Worker B can’t enter its `Get` until `lkA` releases, so it always sees the new version and never collides with a stale `Put`.
+
+In src directory, try to test the locking mechanism with `go test ./kvsrv1/lock -run TestLockDemo -v`
+
+
+To run all tests for lab 2:
+Go to src/kvsrv1 and run `go test -v`
