@@ -149,6 +149,37 @@ type RequestVoteReply struct {
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	candidateTerm := args.term
+	candidateId := args.candidateId
+	candidateLastLogIndex := args.lastLogIndex
+	candidateLastLogTerm := args.lastLogTerm
+
+	if candidateTerm > rf.currentTerm {
+		rf.currentTerm = candidateTerm 
+		rf.votedFor = -1
+		rf.serverState = follower
+	}
+
+	if candidateTerm < rf.currentTerm {
+		reply.term = rf.currentTerm
+		reply.voteGranted = false
+		return
+	}
+
+	if (rf.votedFor == -1 || rf.votedFor == candidateId) {
+		rf.votedFor = candidateId
+		rf.lastHeartbeat = time.Now() // reset election timer
+		reply.term = rf.currentTerm
+		reply.voteGranted = true
+		return
+	}
+
+	reply.term = rf.currentTerm
+	reply.voteGranted = false
+
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -244,7 +275,7 @@ func (rf *Raft) ticker() {
 
 			currentTerm := rf.currentTerm
 			me := rf.me 
-			
+
 			var lastLogIndex int 
 			var lastLogTerm int
 			if len(rf.log) > 0 {
@@ -300,6 +331,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.votedFor = -1
 
 	// Your initialization code here (3A, 3B, 3C).
 
