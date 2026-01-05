@@ -19,6 +19,15 @@ import (
 	"6.5840/tester1"
 )
 
+type ServerState int 
+
+const (
+	// this assigns follower=0, leader=1, candidate=2
+	follower ServerState = iota
+	leader 
+	candidate
+)
+
 type Entry struct {
 	command 	string
 	term		int
@@ -27,23 +36,26 @@ type Entry struct {
 
 // A Go object implementing a single Raft peer.
 type Raft struct {
-	mu        	sync.Mutex          // Lock to protect shared access to this peer's state
-	peers     	[]*labrpc.ClientEnd // RPC end points of all peers
-	persister 	*tester.Persister   // Object to hold this peer's persisted state
-	me        	int                 // this peer's index into peers[]
-	dead      	int32               // set by Kill()
+	mu        		sync.Mutex          // Lock to protect shared access to this peer's state
+	peers     		[]*labrpc.ClientEnd // RPC end points of all peers
+	persister 		*tester.Persister   // Object to hold this peer's persisted state
+	me        		int                 // this peer's index into peers[]
+	dead      		int32               // set by Kill()
 
 	// Your data here (3A, 3B, 3C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 	// MY IMPLEMENTATION
-	currentTerm int					// latest term server has seen
-	votedFor    int					// candidateId that received vote in current term
-	log 		[]Entry				// log entries; entry contains command for state machine and term
-	commitIndex	int					// index of highest log entry known to be committed
-	lastApplied	int					// index of highest log entry applied to state machine
-	nextIndex 	[]int				// for each server, index of the next log entry to send to that server
-	matchIndex	[]int				// for each server, index of highest log entry known to be replicated on server
+	currentTerm 	int					// latest term server has seen
+	votedFor    	int					// candidateId that received vote in current term
+	log 			[]Entry				// log entries; entry contains command for state machine and term
+	commitIndex		int					// index of highest log entry known to be committed
+	lastApplied		int					// index of highest log entry applied to state machine
+	nextIndex 		[]int				// for each server, index of the next log entry to send to that server
+	matchIndex		[]int				// for each server, index of highest log entry known to be replicated on server
+	serverState		ServerState
+	lastHeartbeat	time.Time			// last time we got a successful heartbeat from a leader
+	electionTimeout	time.Duration		// duration that determines whether an election should start. If time since our lastHearbeat was more than electionTimeout, start election
 
 }
 
@@ -217,6 +229,35 @@ func (rf *Raft) ticker() {
 
 		// Your code here (3A)
 		// Check if a leader election should be started.
+
+		// if time since our last heartbeat > than our election timeout, we should start an election
+		rf.mu.Lock()
+		elapsedTime := time.Since(rf.lastHeartbeat)
+		if elapsedTime > rf.electionTimeout {
+			rf.serverState = candidate
+			rf.currentTerm += 1
+			rf.votedFor = rf.me // vote for itself
+			rf.electionTimeout = time.Duration(400 + rand.Int63() % 800 * int64(time.Millisecond)) // reset election timeout (range between 400 and 800 milliseconds)
+			rf.lastHeartbeat = time.Now()
+
+			currentTerm := rf.currentTerm
+			me := rf.me 
+			lastLogIndex := len(rf.log) - 1
+			lastLogTerm := rf.log[len(rf.log) - 1].term
+			rf.mu.Unlock()
+
+			for i := range rf.peers {
+				if i != rf.me {
+					go func(peer int) {
+						// send rpc to peer
+						// handle reply
+					}(i)
+				}
+			}
+		} else {
+			// need to unlock, if not a deadlock could happen
+			rf.mu.Unlock()
+		}
 
 
 		// pause for a random amount of time between 50 and 350
