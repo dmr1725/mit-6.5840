@@ -19,18 +19,31 @@ import (
 	"6.5840/tester1"
 )
 
+type Entry struct {
+	command 	string
+	term		int
+}
+
 
 // A Go object implementing a single Raft peer.
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
-	peers     []*labrpc.ClientEnd // RPC end points of all peers
-	persister *tester.Persister   // Object to hold this peer's persisted state
-	me        int                 // this peer's index into peers[]
-	dead      int32               // set by Kill()
+	mu        	sync.Mutex          // Lock to protect shared access to this peer's state
+	peers     	[]*labrpc.ClientEnd // RPC end points of all peers
+	persister 	*tester.Persister   // Object to hold this peer's persisted state
+	me        	int                 // this peer's index into peers[]
+	dead      	int32               // set by Kill()
 
 	// Your data here (3A, 3B, 3C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
+	// MY IMPLEMENTATION
+	currentTerm int					// latest term server has seen
+	votedFor    int					// candidateId that received vote in current term
+	log 		[]Entry				// log entries; entry contains command for state machine and term
+	commitIndex	int					// index of highest log entry known to be committed
+	lastApplied	int					// index of highest log entry applied to state machine
+	nextIndex 	[]int				// for each server, index of the next log entry to send to that server
+	matchIndex	[]int				// for each server, index of highest log entry known to be replicated on server
 
 }
 
