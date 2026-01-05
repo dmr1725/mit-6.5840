@@ -118,12 +118,18 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // field names must start with capital letters!
 type RequestVoteArgs struct {
 	// Your data here (3A, 3B).
+	term			int // candidate's term
+	candidateId 	int	// candidate requesting vote
+	lastLogIndex	int	// index of candidate's last log entry
+	lastLogTerm		int	// term of candidate's last log entry
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (3A).
+	term			int  // currentTerm, for candidate to update itself
+	voteGranted		bool // true means candidate received vote
 }
 
 // example RequestVote RPC handler.
