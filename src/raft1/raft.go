@@ -59,6 +59,8 @@ type Raft struct {
 
 }
 
+
+
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -238,20 +240,36 @@ func (rf *Raft) ticker() {
 			rf.currentTerm += 1
 			rf.votedFor = rf.me // vote for itself
 			rf.electionTimeout = time.Duration(400 + rand.Int63() % 800 * int64(time.Millisecond)) // reset election timeout (range between 400 and 800 milliseconds)
-			rf.lastHeartbeat = time.Now()
+			rf.lastHeartbeat = time.Now() // need to reset last heart beat because it can timeout again. Remember that ticker is running continuosly
 
 			currentTerm := rf.currentTerm
 			me := rf.me 
-			lastLogIndex := len(rf.log) - 1
-			lastLogTerm := rf.log[len(rf.log) - 1].term
+			
+			var lastLogIndex int 
+			var lastLogTerm int
+			if len(rf.log) > 0 {
+				lastLogIndex = len(rf.log) - 1
+				lastLogTerm = rf.log[len(rf.log) - 1].term
+			} else {
+				lastLogIndex = -1
+				lastLogTerm = 0
+			}
 			rf.mu.Unlock()
 
-			for i := range rf.peers {
-				if i != rf.me {
+			for server := range rf.peers {
+				if server != rf.me {
 					go func(peer int) {
 						// send rpc to peer
+						args := &RequestVoteArgs{
+							term: currentTerm,
+							candidateId: me,
+							lastLogIndex: lastLogIndex,
+							lastLogTerm: lastLogTerm,
+						}
+						reply := &RequestVoteReply{}
+						ok := rf.sendRequestVote(server, args, reply)
 						// handle reply
-					}(i)
+					}(server)
 				}
 			}
 		} else {
