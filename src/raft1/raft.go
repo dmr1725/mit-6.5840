@@ -296,8 +296,9 @@ func (rf *Raft) ticker() {
 			rf.votedFor = rf.me // vote for itself
 			rf.electionTimeout = time.Duration(400 + rand.Int63() % 800 * int64(time.Millisecond)) // reset election timeout (range between 400 and 800 milliseconds)
 			rf.lastHeartbeat = time.Now() // need to reset last heart beat because it can timeout again. Remember that ticker is running continuosly
+			votesReceived := 1
 
-			currentTerm := rf.currentTerm
+			currentTerm := rf.currentTerm // THIS term election
 			me := rf.me 
 
 			var lastLogIndex int 
@@ -310,7 +311,8 @@ func (rf *Raft) ticker() {
 				lastLogTerm = 0
 			}
 			rf.mu.Unlock()
-
+			
+			// asking for votes to other peers as candidate
 			for server := range rf.peers {
 				if server != rf.me {
 					go func(peer int) {
@@ -322,8 +324,33 @@ func (rf *Raft) ticker() {
 							lastLogTerm: lastLogTerm,
 						}
 						reply := &RequestVoteReply{}
-						ok := rf.sendRequestVote(server, args, reply)
+						ok := rf.sendRequestVote(peer, args, reply)
 						// handle reply
+						if ok {
+							rf.mu.Lock()
+							// check that server is still candidate in the same term that the election started 
+							if rf.serverState == candidate && currentTerm == rf.currentTerm {
+								if reply.term > currentTerm {
+									// step down
+									rf.currentTerm = reply.term
+									rf.serverState = follower
+								} else if reply.voteGranted {
+									votesReceived++
+
+									quorumMajority := (len(rf.peers) / 2) + 1
+									if votesReceived >= quorumMajority {
+										rf.serverState = leader
+										// initialize nextIndex[] and matchIndex[]
+										for server := range rf.peers {
+											rf.nextIndex[server] = lastLogIndex + 1
+											rf.matchIndex[server] = 0
+										}
+									}
+								}
+							} 
+							rf.mu.Unlock()
+							return
+						}
 					}(server)
 				}
 			}
@@ -356,6 +383,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 	rf.votedFor = -1
+	rf.electionTimeout = time.Duration(400 + rand.Int63() % 800 * int64(time.Millisecond))
+	rf.lastHeartbeat = time.Now()
+	rf.nextIndex = make([]int, len(peers))
+	rf.matchIndex = make([]int, len(peers))
 
 	// Your initialization code here (3A, 3B, 3C).
 
