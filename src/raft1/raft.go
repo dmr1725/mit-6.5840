@@ -146,6 +146,30 @@ type RequestVoteReply struct {
 	voteGranted		bool // true means candidate received vote
 }
 
+// return true if candidate's log is at least up to date - section 5.4.1 of paper last paragraph
+func (rf *Raft) isCandidateLogUpToDate(candidateLastLogTerm int, candidateLastLogIndex int) bool {
+	var receiverLastLogTerm int
+	var receiverLastLogIndex int 
+	if len(rf.log) > 1 {
+		receiverLastLogTerm = rf.log[len(rf.log) - 1].term
+		receiverLastLogIndex = len(rf.log) - 1
+	} else {
+		receiverLastLogTerm = 0
+		receiverLastLogIndex = -1
+	}
+
+	candidateUpToDate := false
+	if candidateLastLogTerm > receiverLastLogTerm {
+		candidateUpToDate = true
+	} else if candidateLastLogTerm == receiverLastLogTerm {
+		if candidateLastLogIndex >= receiverLastLogIndex {
+			candidateUpToDate = true
+		}
+	}
+
+	return candidateUpToDate
+}
+
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
@@ -154,8 +178,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	candidateTerm := args.term
 	candidateId := args.candidateId
-	candidateLastLogIndex := args.lastLogIndex
-	candidateLastLogTerm := args.lastLogTerm
 
 	if candidateTerm > rf.currentTerm {
 		rf.currentTerm = candidateTerm 
@@ -168,8 +190,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.voteGranted = false
 		return
 	}
-
-	if (rf.votedFor == -1 || rf.votedFor == candidateId) {
+	
+	candidateLastLogIndex := args.lastLogIndex
+	candidateLastLogTerm := args.lastLogTerm
+	if ((rf.votedFor == -1 || rf.votedFor == candidateId) && rf.isCandidateLogUpToDate(candidateLastLogTerm, candidateLastLogIndex)) {
 		rf.votedFor = candidateId
 		rf.lastHeartbeat = time.Now() // reset election timer
 		reply.term = rf.currentTerm
