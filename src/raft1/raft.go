@@ -413,6 +413,7 @@ func (rf *Raft) ticker() {
 									votesReceived++
 
 									quorumMajority := (len(rf.peers) / 2) + 1
+									// won election
 									if votesReceived >= quorumMajority {
 										rf.serverState = leader
 										// initialize nextIndex[] and matchIndex[]
@@ -456,11 +457,32 @@ func (rf *Raft) sendHeartBeats() {
 			for server := range rf.peers {
 				if server != rf.me {
 					go func(peer int){
+						var entries []Entry
+
+						/*
+						determine what entries to send to peer
+
+						If the peer server is not caught up with me (leader), send the missing entries
+						If the peer server is caught up with me (leader), send empty entry (heartbeat)
+						*/
+						rf.mu.Lock()
+						peerNextIndex := rf.nextIndex[peer] // index of the next log entry to send to that server
+						if peerNextIndex < len(rf.log) {
+							entries = rf.log[peerNextIndex:] // send missing logs (starting from peerNextIndex)
+
+						} else{ // caught up - send empty entry (heartbeat)
+							entries = []Entry{}
+						}
+						prevLogIndex := rf.nextIndex[peer] - 1
+						prevLogTerm := rf.log[prevLogIndex].Term
+						rf.mu.Unlock()
 						args := &AppendEntriesArgs{
 							Term: currentTerm,
 							LeaderId: me,
 							LeaderCommit: commitIndex,
-							Entries: []Entry{},
+							PrevLogIndex: prevLogIndex,
+							PrevLogTerm: prevLogTerm,
+							Entries: entries,
 						}
 						reply := &AppendEntriesReply{}
 						ok := rf.appendEntries(server, args, reply)
