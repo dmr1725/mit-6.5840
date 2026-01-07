@@ -68,8 +68,14 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (3A).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	term = rf.currentTerm
+	isleader = rf.serverState == leader
 	return term, isleader
 }
+
 
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
@@ -146,6 +152,26 @@ type RequestVoteReply struct {
 	voteGranted		bool // true means candidate received vote
 }
 
+// AppendEntries RPC arguments structure.
+// field names must start with capital letters!
+type AppendEntriesArgs struct {
+	// Your data here (3A, 3B).
+	term			int // leader's term
+	leaderId     	int	// so follower can redirect clients
+	prevLogIndex	int	// index of log entry immediately preceding new ones
+	prevLogTerm		int	// term of prevLogIndex entry
+	entries			[]Entry // log entries to store (empty for heartbeat; may send more than one efficiency)
+	leaderCommit	int // leader's commitIndex
+}
+
+// AppendEntries RPC reply structure.
+// field names must start with capital letters!
+type AppendEntriesReply struct {
+	// Your data here (3A).
+	term			int  // currentTerm, for leader to update itself
+	success		    bool // true if follower contained entry matching prevLogIndex and prevLogTerm
+}
+
 // return true if candidate's log is at least up to date - section 5.4.1 of paper last paragraph
 func (rf *Raft) isCandidateLogUpToDate(candidateLastLogTerm int, candidateLastLogIndex int) bool {
 	var receiverLastLogTerm int
@@ -206,6 +232,36 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 }
 
+// example AppendEntries RPC handler - receiver of append entries
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	// check term
+	if args.term < rf.currentTerm {
+		reply.term = rf.currentTerm
+		reply.success = false
+		return
+	}
+
+	// update term if higher
+	if args.term > rf.currentTerm {
+		rf.currentTerm = args.term
+		rf.votedFor = -1
+		rf.serverState = follower
+	}
+
+	// if valid leader is sending append entries, become follower
+	if rf.serverState != follower {
+		rf.serverState = follower
+	}
+
+	rf.lastHeartbeat = time.Now()
+	reply.term = rf.currentTerm
+	reply.success = true
+
+}
+
 // example code to send a RequestVote RPC to a server.
 // server is the index of the target server in rf.peers[].
 // expects RPC arguments in args.
@@ -235,6 +291,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	return ok
+}
+
+func (rf *Raft) appendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
 
@@ -367,6 +428,45 @@ func (rf *Raft) ticker() {
 	}
 }
 
+func (rf *Raft) sendHeartBeats() {
+	for rf.killed() == false {
+		_, isleader := rf.GetState()
+		if isleader {
+			rf.mu.Lock()
+			currentTerm := rf.currentTerm
+			me := rf.me 
+			commitIndex := rf.commitIndex
+			rf.mu.Unlock()
+
+			// send heartbeats
+			for server := range rf.peers {
+				if server != rf.me {
+					go func(peer int){
+						args := &AppendEntriesArgs{
+							term: currentTerm,
+							leaderId: me,
+							leaderCommit: commitIndex,
+							entries: []Entry{},
+						}
+						reply := &AppendEntriesReply{}
+						ok := rf.appendEntries(server, args, reply)
+						if ok {
+							rf.mu.Lock()
+							if reply.term > rf.currentTerm {
+								rf.currentTerm = reply.term
+								rf.serverState = follower 
+								rf.votedFor = -1
+							}
+							rf.mu.Unlock()
+						}
+					}(server)
+				}
+			}
+		}
+		time.Sleep(time.Duration(100) * time.Millisecond)
+	}
+}
+
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
@@ -396,6 +496,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// start ticker goroutine to start elections
 	go rf.ticker()
 
+	// start sendHeartBeats goroutine to send heartbeats
+	go rf.sendHeartBeats()
 
 	return rf
 }
