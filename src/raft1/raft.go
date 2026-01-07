@@ -29,7 +29,7 @@ const (
 )
 
 type Entry struct {
-	Command 	string
+	Command 	interface{}
 	Term		int
 }
 
@@ -312,13 +312,27 @@ func (rf *Raft) appendEntries(server int, args *AppendEntriesArgs, reply *Append
 // if it's ever committed. the second return value is the current
 // term. the third return value is true if this server believes it is
 // the leader.
+// starts the replication process!!!
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
-	isLeader := true
+	isLeader := false
 
 	// Your code here (3B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
+	// if is leader, save command to your log in memory
+	isLeader = rf.serverState == leader
+	term = rf.currentTerm
+	if isLeader {
+		rf.log = append(rf.log, Entry{
+			Command: command,
+			Term: term,
+		})
+		index = len(rf.log) - 1
+		return index, term, isLeader
+	}
 
 	return index, term, isLeader
 }
@@ -487,6 +501,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastHeartbeat = time.Now()
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
+	rf.log = []Entry{
+		{Command: nil, Term: 0},
+	}
 
 	// Your initialization code here (3A, 3B, 3C).
 
