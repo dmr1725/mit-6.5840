@@ -237,24 +237,33 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	// check term
+	// if leader term is less than my term (I'm a follower), reject
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
 	}
 
-	// update term if higher
+	// update term if leader's term is higher (part of rules for all servers Figure 2 - raft paper)
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		rf.serverState = follower
 	}
 
-	// if valid leader is sending append entries, become follower
+	// if you're receiving append entries, it is from a valid leader. 
+	// Maybe you were a candidate in an election, need to make sure you're a follower because there is a valid leader
 	if rf.serverState != follower {
 		rf.serverState = follower
 	}
+
+	// if receiver logs does not contain an entry at prevLogIndex whose term matches prevLogTerm
+	if len(rf.log) <= args.PrevLogIndex || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		return
+	}
+
 
 	rf.lastHeartbeat = time.Now()
 	reply.Term = rf.currentTerm
