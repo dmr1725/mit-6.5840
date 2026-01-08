@@ -257,6 +257,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.serverState = follower
 	}
 
+	rf.lastHeartbeat = time.Now()
+
 	// if receiver logs does not contain an entry at prevLogIndex whose term matches prevLogTerm
 	if len(rf.log) <= args.PrevLogIndex || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		reply.Term = rf.currentTerm
@@ -264,8 +266,54 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
+	// if an existing entry (rf.log) conflicts with a new one (args.Entries) (same index, but different terms), 
+	// delete the existing entry and all that follow it - section 5.3
+	for index := range args.Entries {
+		targetIndex := args.PrevLogIndex + 1 + index
 
-	rf.lastHeartbeat = time.Now()
+		/*
+
+		Example: 
+			leader entries [{command: nil, term: 0}, {command: A, term: 1}, {command: B, term: 3}, {command: C, term: 3}]
+			prevLogIndex 1
+
+			targetIndex = 2
+			rf.log         [{command: nil, term: 0}, {command: A, term: 1}, {command: C, term: 2}]
+			args.Entries.  [{command: B, term: 3}, {command: C, term: 3}]
+		*/
+		// means that I already have an entry at targetIndex with different term in args.Entries
+		if targetIndex < len(rf.log) && rf.log[targetIndex].Term != args.Entries[index].Term {
+			rf.log = rf.log[:targetIndex] // truncating log
+			rf.log = append(rf.log, args.Entries[index:]...) // append entries to rf.log starting from index
+
+			reply.Term = rf.currentTerm
+			reply.Success = true
+			return
+		}
+	}
+
+	// append entries, but don't append duplicates
+	/*
+
+		Example: 
+			leader entries [{command: nil, term: 0}, {command: A, term: 1}, {command: B, term: 3}, {command: C, term: 3}]
+			prevLogIndex 1
+
+			targetIndex = 2
+			rf.log         [{command: nil, term: 0}, {command: A, term: 1}, {command: B, term: 3}]
+			args.Entries.  [{command: B, term: 3}, {command: C, term: 3}]
+		*/
+	if len(args.Entries) > 0 {
+		firstNewIndex := len(rf.log) - (args.PrevLogIndex + 1)
+		if firstNewIndex < len(args.Entries){
+			rf.log = append(rf.log, args.Entries[firstNewIndex:]...)
+		}
+	}
+
+	if args.LeaderCommit > rf.commitIndex {
+		rf.commitIndex = min(args.LeaderCommit, len(rf.log) - 1)
+	}
+
 	reply.Term = rf.currentTerm
 	reply.Success = true
 
@@ -535,6 +583,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.log = []Entry{
 		{Command: nil, Term: 0},
 	}
+	rf.commitIndex = 0
 
 	// Your initialization code here (3A, 3B, 3C).
 
