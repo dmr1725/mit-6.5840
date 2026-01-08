@@ -549,6 +549,37 @@ func (rf *Raft) sendHeartBeats() {
 								rf.currentTerm = reply.Term
 								rf.serverState = follower
 								rf.votedFor = -1
+
+								rf.mu.Unlock()
+								return
+							}
+
+							if reply.Success == true {
+								rf.nextIndex[peer] = prevLogIndex + 1 + len(args.Entries)
+								rf.matchIndex[peer] = prevLogIndex + len(args.Entries)
+
+								// what's the highest index (N) in my log that a majority of servers have replicated? Once we find N, we can update commitIndex of leader
+								// If there exists an N such that N>commitIndex, a majority of matchIndex[i]≥N, and log[N].term==currentTerm, setcommitIndex=N - Figure 2 Rules for servers leader section
+								for N := len(rf.log) - 1; N > rf.commitIndex; N-- {
+
+									count := 1 // number of servers that have replicated up to N (start with 1 - count yourself the leader)
+
+									for peer := range rf.peers {
+										if peer != rf.me && rf.matchIndex[peer] >= N {
+											count++
+										}
+									}
+									
+										// Leaders can only commit entries from their current term by counting replicas. This prevents committing old entries from previous terms that might be overwritten.
+									if rf.log[N].Term == rf.currentTerm && count >= (len(rf.peers) / 2) + 1 {
+										rf.commitIndex = N
+										break
+									}
+								}
+							}
+
+							if reply.Success == false {
+								rf.nextIndex[peer] -= 1
 							}
 							rf.mu.Unlock()
 						}
