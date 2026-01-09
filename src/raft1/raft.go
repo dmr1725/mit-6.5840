@@ -56,6 +56,8 @@ type Raft struct {
 	serverState		ServerState
 	lastHeartbeat	time.Time			// last time we got a successful heartbeat from a leader
 	electionTimeout	time.Duration		// duration that determines whether an election should start. If time since our lastHearbeat was more than electionTimeout, start election
+	applyCh			chan raftapi.ApplyMsg
+	applyCond		*sync.Cond
 
 }
 
@@ -289,6 +291,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			// update commitIndex after appending
 			if args.LeaderCommit > rf.commitIndex {
 				rf.commitIndex = min(args.LeaderCommit, len(rf.log) - 1)
+				rf.applyCond.Signal() // signal when commit index advances
 			}
 
 			reply.Term = rf.currentTerm
@@ -318,6 +321,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// update commitIndex after appending
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, len(rf.log) - 1)
+		rf.applyCond.Signal() // signal when commit index advances
 	}
 
 	reply.Term = rf.currentTerm
@@ -412,6 +416,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	rf.applyCond.Signal() // signal the condition variable so the applier can exit
 }
 
 func (rf *Raft) killed() bool {
@@ -467,7 +472,7 @@ func (rf *Raft) ticker() {
 						if ok {
 							rf.mu.Lock()
 							lastLogIndex := len(rf.log) - 1 // reassing lastLogIndex after releasing lock above and locking again (value may have changed)
-							
+
 							// check that server is still candidate in the same term that the election started
 							if rf.serverState == candidate && currentTerm == rf.currentTerm {
 								if reply.Term > currentTerm {
@@ -586,6 +591,7 @@ func (rf *Raft) sendHeartBeats() {
 										// Leaders can only commit entries from their current term by counting replicas. This prevents committing old entries from previous terms that might be overwritten.
 									if rf.log[N].Term == rf.currentTerm && count >= (len(rf.peers) / 2) + 1 {
 										rf.commitIndex = N
+										rf.applyCond.Signal() // signal when commit index advances
 										break
 									}
 								}
@@ -601,6 +607,38 @@ func (rf *Raft) sendHeartBeats() {
 			}
 		}
 		time.Sleep(time.Duration(100) * time.Millisecond)
+	}
+}
+
+
+func (rf *Raft) applyEntries() {
+	for rf.killed() == false {
+		rf.mu.Lock()
+
+		for rf.commitIndex <= rf.lastApplied && !rf.killed() {
+			rf.applyCond.Wait()
+		}
+
+		if rf.killed() {
+			rf.mu.Unlock()
+			return
+		}
+
+		// copy entries to apply (from lastApplied + 1 to commitIndex)
+		entries := rf.log[rf.lastApplied + 1: rf.commitIndex + 1]
+		startIndex := rf.lastApplied + 1
+		rf.lastApplied = rf.commitIndex
+
+		rf.mu.Unlock()
+
+		for index, entry := range entries {
+			// send
+			rf.applyCh <- raftapi.ApplyMsg{
+				CommandValid: true,
+				Command:      entry.Command,
+				CommandIndex: startIndex + index,
+			}
+		}
 	}
 }
 
@@ -628,6 +666,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		{Command: nil, Term: 0},
 	}
 	rf.commitIndex = 0
+	rf.applyCh = applyCh
+	rf.applyCond = sync.NewCond(&rf.mu)
 
 	// Your initialization code here (3A, 3B, 3C).
 
@@ -639,6 +679,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start sendHeartBeats goroutine to send heartbeats
 	go rf.sendHeartBeats()
+
+	// apply entries to state machine after committing
+	go rf.applyEntries()
 
 	return rf
 }
