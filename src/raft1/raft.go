@@ -614,9 +614,19 @@ func (rf *Raft) sendHeartBeats() {
 func (rf *Raft) applyEntries() {
 	for rf.killed() == false {
 		rf.mu.Lock()
+		
+		/*
+		we want to apply entries to state machine when commitIndex > lastApplied
 
+		if the condition in loop is true, we call Wait() on applyCond because commitIndex is not greater than last applied. 
+		This will sleep the goroutine and release lock. If its false (commitIndex > lastApplied), we get out of the loop.
+
+		every time our goroutine wakes up by a rf.applyCond.Signal(), goroutine will wake up, reaquire lock and go to next iteration to check that rf.commitIndex <= rf.lastApplied. 
+
+		how can applyCond releases/re-acquire lock? Because we initialized applyCond like sync.NewCond(&rf.mu), which links the mutex with our condition
+		*/
 		for rf.commitIndex <= rf.lastApplied && !rf.killed() {
-			rf.applyCond.Wait()
+			rf.applyCond.Wait() // sleeps, releases lock, re-acquires when woken by a signal
 		}
 
 		if rf.killed() {
