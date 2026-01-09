@@ -286,6 +286,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.log = rf.log[:targetIndex] // truncating log
 			rf.log = append(rf.log, args.Entries[index:]...) // append entries to rf.log starting from index
 
+			// update commitIndex after appending
+			if args.LeaderCommit > rf.commitIndex {
+				rf.commitIndex = min(args.LeaderCommit, len(rf.log) - 1)
+			}
+
 			reply.Term = rf.currentTerm
 			reply.Success = true
 			return
@@ -310,6 +315,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 
+	// update commitIndex after appending
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, len(rf.log) - 1)
 	}
@@ -460,6 +466,8 @@ func (rf *Raft) ticker() {
 						// handle reply
 						if ok {
 							rf.mu.Lock()
+							lastLogIndex := len(rf.log) - 1 // reassing lastLogIndex after releasing lock above and locking again (value may have changed)
+							
 							// check that server is still candidate in the same term that the election started
 							if rf.serverState == candidate && currentTerm == rf.currentTerm {
 								if reply.Term > currentTerm {
@@ -545,11 +553,16 @@ func (rf *Raft) sendHeartBeats() {
 						ok := rf.appendEntries(server, args, reply)
 						if ok {
 							rf.mu.Lock()
-							if reply.Term > rf.currentTerm {
+							if reply.Term > currentTerm {
 								rf.currentTerm = reply.Term
 								rf.serverState = follower
 								rf.votedFor = -1
 
+								rf.mu.Unlock()
+								return
+							}
+
+							if rf.currentTerm != currentTerm || rf.serverState != leader {
 								rf.mu.Unlock()
 								return
 							}
