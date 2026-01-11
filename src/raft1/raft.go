@@ -559,8 +559,9 @@ func (rf *Raft) sendHeartBeats() {
 						rf.mu.Lock()
 						peerNextIndex := rf.nextIndex[peer] // index of the next log entry to send to that server
 						if peerNextIndex < len(rf.log) {
-							entries = rf.log[peerNextIndex:] // send missing logs (starting from peerNextIndex)
-
+							// Make a copy to avoid sharing backing array with rf.log
+							entries = make([]Entry, len(rf.log)-peerNextIndex)
+							copy(entries, rf.log[peerNextIndex:]) // send missing logs (starting from peerNextIndex)
 						} else{ // caught up - send empty entry (heartbeat)
 							entries = []Entry{}
 						}
