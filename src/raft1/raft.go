@@ -437,7 +437,7 @@ func (rf *Raft) ticker() {
 			rf.serverState = candidate
 			rf.currentTerm += 1
 			rf.votedFor = rf.me // vote for itself
-			rf.electionTimeout = time.Duration(400 + rand.Int63() % 800 * int64(time.Millisecond)) // reset election timeout (range between 400 and 800 milliseconds)
+			rf.electionTimeout = time.Duration(400+rand.Int63()%400) * time.Millisecond  // reset election timeout (range between 400 and 800 milliseconds)
 			rf.lastHeartbeat = time.Now() // need to reset last heart beat because it can timeout again. Remember that ticker is running continuosly
 			votesReceived := 1
 
@@ -598,7 +598,9 @@ func (rf *Raft) sendHeartBeats() {
 							}
 
 							if reply.Success == false {
-								rf.nextIndex[peer] -= 1
+								if rf.nextIndex[peer] > 1 {
+									rf.nextIndex[peer] -= 1
+								}
 							}
 							rf.mu.Unlock()
 						}
@@ -671,7 +673,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 	rf.votedFor = -1
-	rf.electionTimeout = time.Duration(400 + rand.Int63() % 800 * int64(time.Millisecond))
+	rf.electionTimeout = time.Duration(400+rand.Int63()%400) * time.Millisecond 
 	rf.lastHeartbeat = time.Now()
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
