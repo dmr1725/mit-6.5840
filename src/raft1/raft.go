@@ -172,6 +172,9 @@ type AppendEntriesReply struct {
 	// Your data here (3A).
 	Term			int  // currentTerm, for leader to update itself
 	Success		    bool // true if follower contained entry matching prevLogIndex and prevLogTerm
+	XTerm		    int  // the term of the conflicting entry at PrevLogIndex (or -1 if the follower's log is too short)
+	XIndex			int  // the first index where XTerm appears in the follower's log
+	XLen			int  // the length of the follower's log (useful when the log is too short)
 }
 
 // return true if candidate's log is at least up to date - section 5.4.1 of paper last paragraph
@@ -261,8 +264,26 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	rf.lastHeartbeat = time.Now()
 
+	// follower's log is too short (doesn't have an entry at PrevLogIndex)
+	if len(rf.log) <= args.PrevLogIndex {
+		reply.XTerm = -1 
+		reply.XLen = len(rf.log)
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		return
+	}
+
 	// if receiver logs does not contain an entry at prevLogIndex whose term matches prevLogTerm
-	if len(rf.log) <= args.PrevLogIndex || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		reply.XTerm = rf.log[args.PrevLogIndex].Term
+		reply.XLen = len(rf.log)
+		index := 0
+
+		// find the first index where XTerm appears
+		for index < len(rf.log) && rf.log[index].Term != reply.XTerm {
+			index += 1
+		}
+		reply.XIndex = index
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
@@ -598,8 +619,24 @@ func (rf *Raft) sendHeartBeats() {
 							}
 
 							if reply.Success == false {
-								if rf.nextIndex[peer] > 1 {
-									rf.nextIndex[peer] -= 1
+								if reply.XTerm == -1 {
+									rf.nextIndex[peer] = reply.XLen
+								} else {
+									// check if XTerm exists in leader's log
+									index := len(rf.log) -1 
+									for index >= 0 && rf.log[index].Term != reply.XTerm {
+										index--
+									}
+
+									// XTerm exists in leader's log, skip to end of that term in leader's log
+									if index >= 0 {
+										rf.nextIndex[peer] = index + 1
+									}
+
+									// XTerm does not exists in leader's log, skip entire conflicting term
+									if index < 0 {
+										rf.nextIndex[peer] = reply.XIndex
+									}
 								}
 							}
 							rf.mu.Unlock()
