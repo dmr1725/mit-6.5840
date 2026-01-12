@@ -7,13 +7,13 @@ package raft
 // Make() creates a new raft peer that implements the raft interface.
 
 import (
-	//	"bytes"
+	"bytes"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raftapi"
 	"6.5840/tester1"
@@ -88,13 +88,14 @@ func (rf *Raft) GetState() (int, bool) {
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
 	// Your code here (3C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 
@@ -105,17 +106,19 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	// Your code here (3C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int 
+	var votedFor int 
+	var log []Entry
+	if d.Decode(&currentTerm) != nil ||
+	   d.Decode(&votedFor) != nil || d.Decode(&log) != nil {
+	  return
+	} else {
+	  rf.currentTerm = currentTerm
+	  rf.votedFor = votedFor
+	  rf.log = log
+	}
 }
 
 // how many bytes in Raft's persisted log?
@@ -214,6 +217,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.currentTerm = candidateTerm
 		rf.votedFor = -1
 		rf.serverState = follower
+		rf.persist()
 	}
 
 	if candidateTerm < rf.currentTerm {
@@ -229,6 +233,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.lastHeartbeat = time.Now() // reset election timer
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = true
+		rf.persist()
 		return
 	}
 
@@ -254,6 +259,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		rf.serverState = follower
+		rf.persist()
 	}
 
 	// if you're receiving append entries, it is from a valid leader. 
@@ -317,6 +323,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 			reply.Term = rf.currentTerm
 			reply.Success = true
+			rf.persist()
 			return
 		}
 	}
@@ -336,6 +343,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		firstNewIndex := len(rf.log) - (args.PrevLogIndex + 1)
 		if firstNewIndex < len(args.Entries){
 			rf.log = append(rf.log, args.Entries[firstNewIndex:]...)
+			rf.persist()
 		}
 	}
 
@@ -419,6 +427,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			Term: term,
 		})
 		index = len(rf.log) - 1
+		rf.persist()
 		return index, term, isLeader
 	}
 
@@ -461,6 +470,7 @@ func (rf *Raft) ticker() {
 			rf.electionTimeout = time.Duration(400+rand.Int63()%400) * time.Millisecond  // reset election timeout (range between 400 and 800 milliseconds)
 			rf.lastHeartbeat = time.Now() // need to reset last heart beat because it can timeout again. Remember that ticker is running continuosly
 			votesReceived := 1
+			rf.persist()
 
 			currentTerm := rf.currentTerm // THIS term election
 			me := rf.me 
@@ -500,6 +510,7 @@ func (rf *Raft) ticker() {
 									// step down
 									rf.currentTerm = reply.Term
 									rf.serverState = follower
+									rf.persist()
 								} else if reply.VoteGranted {
 									votesReceived++
 
@@ -584,6 +595,7 @@ func (rf *Raft) sendHeartBeats() {
 								rf.currentTerm = reply.Term
 								rf.serverState = follower
 								rf.votedFor = -1
+								rf.persist()
 
 								rf.mu.Unlock()
 								return
@@ -618,7 +630,8 @@ func (rf *Raft) sendHeartBeats() {
 									}
 								}
 							}
-
+							
+							// follower rejected probably because of a conflicting entry
 							if reply.Success == false {
 								if reply.XTerm == -1 {
 									rf.nextIndex[peer] = reply.XLen
