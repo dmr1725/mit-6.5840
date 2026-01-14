@@ -36,30 +36,32 @@ type Entry struct {
 
 // A Go object implementing a single Raft peer.
 type Raft struct {
-	mu        		sync.Mutex          // Lock to protect shared access to this peer's state
-	peers     		[]*labrpc.ClientEnd // RPC end points of all peers
-	persister 		*tester.Persister   // Object to hold this peer's persisted state
-	me        		int                 // this peer's index into peers[]
-	dead      		int32               // set by Kill()
+	mu        			sync.Mutex          	// Lock to protect shared access to this peer's state
+	peers     			[]*labrpc.ClientEnd 	// RPC end points of all peers
+	persister 			*tester.Persister   	// Object to hold this peer's persisted state
+	me        			int                 	// this peer's index into peers[]
+	dead      			int32               	// set by Kill()
 
 	// Your data here (3A, 3B, 3C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 	// MY IMPLEMENTATION
-	currentTerm 	int					// latest term server has seen
-	votedFor    	int					// candidateId that received vote in current term
-	log 			[]Entry				// log entries; entry contains command for state machine and term
-	commitIndex		int					// index of highest log entry known to be committed
-	lastApplied		int					// index of highest log entry applied to state machine
-	nextIndex 		[]int				// for each server, index of the next log entry to send to that server
-	matchIndex		[]int				// for each server, index of highest log entry known to be replicated on server
-	serverState		ServerState
-	lastHeartbeat	time.Time			// last time we got a successful heartbeat from a leader
-	electionTimeout	time.Duration		// duration that determines whether an election should start. If time since our lastHearbeat was more than electionTimeout, start election
-	applyCh			chan raftapi.ApplyMsg
-	applyCond		*sync.Cond
-
+	currentTerm 		int						// latest term server has seen
+	votedFor    		int						// candidateId that received vote in current term
+	log 				[]Entry					// log entries; entry contains command for state machine and term
+	commitIndex			int						// index of highest log entry known to be committed
+	lastApplied			int						// index of highest log entry applied to state machine
+	nextIndex 			[]int					// for each server, index of the next log entry to send to that server
+	matchIndex			[]int					// for each server, index of highest log entry known to be replicated on server
+	serverState			ServerState
+	lastHeartbeat		time.Time				// last time we got a successful heartbeat from a leader
+	electionTimeout		time.Duration			// duration that determines whether an election should start. If time since our lastHearbeat was more than electionTimeout, start election
+	applyCh				chan raftapi.ApplyMsg
+	applyCond			*sync.Cond				// condition variable
+	lastIncludedIndex 	int						// highest log index (last entry) in the snapshot
+	lastIncludedTerm  	int						// term of last included index
 }
+
 
 
 
@@ -179,6 +181,19 @@ type AppendEntriesReply struct {
 	XIndex			int  // the first index where XTerm appears in the follower's log
 	XLen			int  // the length of the follower's log (useful when the log is too short)
 }
+
+/////////////////////////////////////////////////////////////
+// Translation formula when dealing with snapshots - assumes caller holds lock for rf.mu
+// return physical index from logicalIndex
+func (rf *Raft) logicalToPhysical(logicalIndex int) int {
+	return logicalIndex - rf.lastIncludedIndex
+}
+
+// return local index from physicalIndex
+func (rf *Raft) physicalToLogical(physicalIndex int) int {
+	return physicalIndex + rf.lastIncludedIndex
+}
+////////////////////////////////////////////////////////////
 
 // return true if candidate's log is at least up to date - section 5.4.1 of paper last paragraph
 func (rf *Raft) isCandidateLogUpToDate(candidateLastLogTerm int, candidateLastLogIndex int) bool {
@@ -734,6 +749,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitIndex = 0
 	rf.applyCh = applyCh
 	rf.applyCond = sync.NewCond(&rf.mu)
+	rf.lastIncludedIndex = 0
+	rf.lastIncludedTerm = 0
 
 	// Your initialization code here (3A, 3B, 3C).
 
