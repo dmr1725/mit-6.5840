@@ -199,9 +199,9 @@ func (rf *Raft) physicalToLogical(physicalIndex int) int {
 func (rf *Raft) isCandidateLogUpToDate(candidateLastLogTerm int, candidateLastLogIndex int) bool {
 	var receiverLastLogTerm int
 	var receiverLastLogIndex int
-	if len(rf.log) > 1 {
+	if rf.physicalToLogical(len(rf.log)) > 1 {
 		receiverLastLogTerm = rf.log[len(rf.log) - 1].Term
-		receiverLastLogIndex = len(rf.log) - 1
+		receiverLastLogIndex = rf.physicalToLogical(len(rf.log) - 1)
 	} else {
 		receiverLastLogTerm = 0
 		receiverLastLogIndex = -1
@@ -286,25 +286,25 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.lastHeartbeat = time.Now()
 
 	// follower's log is too short (doesn't have an entry at PrevLogIndex)
-	if len(rf.log) <= args.PrevLogIndex {
+	if rf.physicalToLogical(len(rf.log)) <= args.PrevLogIndex {
 		reply.XTerm = -1 
-		reply.XLen = len(rf.log)
+		reply.XLen = rf.physicalToLogical(len(rf.log))
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
 	}
 
 	// if receiver logs does not contain an entry at prevLogIndex whose term matches prevLogTerm
-	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-		reply.XTerm = rf.log[args.PrevLogIndex].Term
-		reply.XLen = len(rf.log)
+	if rf.log[rf.logicalToPhysical(args.PrevLogIndex)].Term != args.PrevLogTerm {
+		reply.XTerm = rf.log[rf.logicalToPhysical(args.PrevLogIndex)].Term
+		reply.XLen = rf.physicalToLogical(len(rf.log))
 		index := 0
 
 		// find the first index where XTerm appears
 		for index < len(rf.log) && rf.log[index].Term != reply.XTerm {
 			index += 1
 		}
-		reply.XIndex = index
+		reply.XIndex = rf.physicalToLogical(index)
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
@@ -313,7 +313,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// if an existing entry (rf.log) conflicts with a new one (args.Entries) (same index, but different terms), 
 	// delete the existing entry and all that follow it - section 5.3
 	for index := range args.Entries {
-		targetIndex := args.PrevLogIndex + 1 + index
+		targetIndex := rf.logicalToPhysical(args.PrevLogIndex + 1 + index)
 
 		/*
 
@@ -332,7 +332,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 			// update commitIndex after appending
 			if args.LeaderCommit > rf.commitIndex {
-				rf.commitIndex = min(args.LeaderCommit, len(rf.log) - 1)
+				rf.commitIndex = min(args.LeaderCommit, rf.physicalToLogical(len(rf.log) - 1))
 				rf.applyCond.Signal() // signal when commit index advances
 			}
 
@@ -355,7 +355,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			args.Entries.  [{command: B, term: 3}, {command: C, term: 3}]
 		*/
 	if len(args.Entries) > 0 {
-		firstNewIndex := len(rf.log) - (args.PrevLogIndex + 1)
+		firstNewIndex := rf.physicalToLogical(len(rf.log)) - (args.PrevLogIndex + 1)
 		if firstNewIndex < len(args.Entries){
 			rf.log = append(rf.log, args.Entries[firstNewIndex:]...)
 			rf.persist()
@@ -364,7 +364,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// update commitIndex after appending
 	if args.LeaderCommit > rf.commitIndex {
-		rf.commitIndex = min(args.LeaderCommit, len(rf.log) - 1)
+		rf.commitIndex = min(args.LeaderCommit, rf.physicalToLogical(len(rf.log) - 1))
 		rf.applyCond.Signal() // signal when commit index advances
 	}
 
@@ -441,7 +441,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			Command: command,
 			Term: term,
 		})
-		index = len(rf.log) - 1
+		index = rf.physicalToLogical(len(rf.log) - 1)
 		rf.persist()
 		return index, term, isLeader
 	}
@@ -493,7 +493,7 @@ func (rf *Raft) ticker() {
 			var lastLogIndex int
 			var lastLogTerm int
 			if len(rf.log) > 0 {
-				lastLogIndex = len(rf.log) - 1
+				lastLogIndex = rf.physicalToLogical(len(rf.log) - 1)
 				lastLogTerm = rf.log[len(rf.log) - 1].Term
 			} else {
 				lastLogIndex = -1
@@ -517,7 +517,7 @@ func (rf *Raft) ticker() {
 						// handle reply
 						if ok {
 							rf.mu.Lock()
-							lastLogIndex := len(rf.log) - 1 // reassing lastLogIndex after releasing lock above and locking again (value may have changed)
+							lastLogIndex := rf.physicalToLogical(len(rf.log) - 1) // reassing lastLogIndex after releasing lock above and locking again (value may have changed)
 
 							// check that server is still candidate in the same term that the election started
 							if rf.serverState == candidate && currentTerm == rf.currentTerm {
@@ -584,15 +584,15 @@ func (rf *Raft) sendHeartBeats() {
 						*/
 						rf.mu.Lock()
 						peerNextIndex := rf.nextIndex[peer] // index of the next log entry to send to that server
-						if peerNextIndex < len(rf.log) {
+						if peerNextIndex < rf.physicalToLogical(len(rf.log)) {
 							// Make a copy to avoid sharing backing array with rf.log
-							entries = make([]Entry, len(rf.log)-peerNextIndex)
-							copy(entries, rf.log[peerNextIndex:]) // send missing logs (starting from peerNextIndex)
+							entries = make([]Entry, rf.physicalToLogical(len(rf.log))-peerNextIndex)
+							copy(entries, rf.log[rf.logicalToPhysical(peerNextIndex):]) // send missing logs (starting from peerNextIndex)
 						} else{ // caught up - send empty entry (heartbeat)
 							entries = []Entry{}
 						}
 						prevLogIndex := rf.nextIndex[peer] - 1
-						prevLogTerm := rf.log[prevLogIndex].Term
+						prevLogTerm := rf.log[rf.logicalToPhysical(prevLogIndex)].Term
 						rf.mu.Unlock()
 						args := &AppendEntriesArgs{
 							Term: currentTerm,
@@ -627,7 +627,7 @@ func (rf *Raft) sendHeartBeats() {
 
 								// what's the highest index (N) in my log that a majority of servers have replicated? Once we find N, we can update commitIndex of leader
 								// If there exists an N such that N>commitIndex, a majority of matchIndex[i]≥N, and log[N].term==currentTerm, setcommitIndex=N - Figure 2 Rules for servers leader section
-								for N := len(rf.log) - 1; N > rf.commitIndex; N-- {
+								for N := rf.physicalToLogical(len(rf.log) - 1); N > rf.commitIndex; N-- {
 
 									count := 1 // number of servers that have replicated up to N (start with 1 - count yourself the leader)
 
@@ -638,7 +638,7 @@ func (rf *Raft) sendHeartBeats() {
 									}
 									
 										// Leaders can only commit entries from their current term by counting replicas. This prevents committing old entries from previous terms that might be overwritten.
-									if rf.log[N].Term == rf.currentTerm && count >= (len(rf.peers) / 2) + 1 {
+									if rf.log[rf.logicalToPhysical(N)].Term == rf.currentTerm && count >= (len(rf.peers) / 2) + 1 {
 										rf.commitIndex = N
 										rf.applyCond.Signal() // signal when commit index advances
 										break
@@ -659,7 +659,7 @@ func (rf *Raft) sendHeartBeats() {
 
 									// XTerm exists in leader's log, skip to end of that term in leader's log
 									if index >= 0 {
-										rf.nextIndex[peer] = index + 1
+										rf.nextIndex[peer] = rf.physicalToLogical(index + 1)
 									}
 
 									// XTerm does not exists in leader's log, skip entire conflicting term
@@ -706,7 +706,7 @@ func (rf *Raft) applyEntries() {
 		}
 
 		// copy entries to apply (from lastApplied + 1 to commitIndex)
-		entries := rf.log[rf.lastApplied + 1: rf.commitIndex + 1]
+		entries := rf.log[rf.logicalToPhysical(rf.lastApplied + 1): rf.logicalToPhysical(rf.commitIndex + 1)]
 		startIndex := rf.lastApplied + 1
 		rf.lastApplied = rf.commitIndex
 
