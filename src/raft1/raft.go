@@ -96,8 +96,27 @@ func (rf *Raft) persist() {
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
 	e.Encode(rf.log)
+	e.Encode(rf.lastIncludedIndex)
+	e.Encode(rf.lastIncludedTerm)
 	raftstate := w.Bytes()
-	rf.persister.Save(raftstate, nil)
+
+	// for normal persist() calls (not during Snapshot), you should persist current snapshot, not nil.
+	rf.persister.Save(raftstate, rf.persister.ReadSnapshot())
+}
+
+// This is when you want to persist a new snapshot - invoked by Snapshot() only
+func (rf *Raft) persistSnapshot(snapshot []byte) {
+	// Your code here (3C).
+	
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	e.Encode(rf.lastIncludedIndex)
+	e.Encode(rf.lastIncludedTerm)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, snapshot)
 }
 
 
@@ -114,7 +133,7 @@ func (rf *Raft) readPersist(data []byte) {
 	var votedFor int 
 	var log []Entry
 	if d.Decode(&currentTerm) != nil ||
-	   d.Decode(&votedFor) != nil || d.Decode(&log) != nil {
+	   d.Decode(&votedFor) != nil || d.Decode(&log) != nil || d.Decode(&rf.lastIncludedIndex) != nil || d.Decode(&rf.lastIncludedTerm) != nil {
 	  return
 	} else {
 	  rf.currentTerm = currentTerm
@@ -137,7 +156,25 @@ func (rf *Raft) PersistBytes() int {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
+	// if we've already snapshotted up to (or beyond) this index, this request is stale
+	if index <= rf.lastIncludedIndex {
+		return 
+	}
+
+	// now all info up to and including index is trimmed
+	// Creates a new slice and copy the entries we want to keep. This breaks the reference to the old array.  
+	rf.lastIncludedTerm = rf.log[rf.logicalToPhysical(index)].Term
+	startIndex := rf.logicalToPhysical(index)
+	newLog := make([]Entry, len(rf.log[startIndex:]))
+	copy(newLog, rf.log[startIndex:])
+	rf.log = newLog
+
+	rf.lastIncludedIndex = index
+
+	rf.persistSnapshot(snapshot)
 }
 
 
@@ -583,7 +620,18 @@ func (rf *Raft) sendHeartBeats() {
 						If the peer server is caught up with me (leader), send empty entry (heartbeat)
 						*/
 						rf.mu.Lock()
-						peerNextIndex := rf.nextIndex[peer] // index of the next log entry to send to that server
+						peerNextIndex := rf.nextIndex[peer] // index of the next log entry to send to that follower server
+						
+						// leader can't send AppendEntries because entries are gone
+						/*
+						Example: Leader snapshotted at index 10 -> so lastIncludedIndex = 10 and log would start at index 10
+						Follower is behind, nextIndex[peer] = 5
+						// Leader needs to send entries 5, 6, 7, 8, 9... but they're gone
+						*/
+						if peerNextIndex <= rf.lastIncludedIndex {
+							// TODO: send InstallSnapshot
+							return
+						}
 						if peerNextIndex < rf.physicalToLogical(len(rf.log)) {
 							// Make a copy to avoid sharing backing array with rf.log
 							entries = make([]Entry, rf.physicalToLogical(len(rf.log))-peerNextIndex)
@@ -756,6 +804,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	// if a snapshot was present, set commitIndex and lastApplied to lastIncludedIndex, why?
+	// Because everything up to lastIncludedIndex is already "applied" via the snapshot. The service layer restore its state from the 
+	// snapshot separately. So Raft should not try to re-apply those entries
+	rf.commitIndex = rf.lastIncludedIndex
+	rf.lastApplied = rf.lastIncludedIndex
+
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
