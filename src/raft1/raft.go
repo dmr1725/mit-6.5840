@@ -219,6 +219,24 @@ type AppendEntriesReply struct {
 	XLen			int  // the length of the follower's log (useful when the log is too short)
 }
 
+// InstallSnapshot RPC arguments structure.
+// field names must start with capital letters!
+type InstallSnapshotArgs struct {
+	// Your data here (3D).
+	Term				int 	// leader's term
+	LeaderId     		int		// so follower can redirect clients
+	LastIncludedIndex	int		// the snapshot replaces all entries up through and including this index
+	LastIncludedTerm	int		// term of LastIncludedIndex
+	Data 				[]byte  // raw bytes of the snapshot chunk			
+}
+
+// InstallSnapshot RPC reply structure.
+// field names must start with capital letters!
+type InstallSnapshotReply struct {
+	// Your data here (3D).
+	Term			int  // currentTerm, for leader to update itself
+}
+
 /////////////////////////////////////////////////////////////
 // Translation formula when dealing with snapshots - assumes caller holds lock for rf.mu
 // return physical index from logicalIndex
@@ -322,6 +340,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	rf.lastHeartbeat = time.Now()
 
+	// PrevLogIndex is before our snapshot - stale RPC                                                                                                                                                                                                                                                                                                                 
+	if args.PrevLogIndex < rf.lastIncludedIndex {                                                                                                                                                                                                                                                                                                                      
+		reply.XTerm = -1                                                                                                                                                                                                                                                                                                                                               
+		reply.XLen = rf.physicalToLogical(len(rf.log))                                                                                                                                                                                                                                                                                                                 
+		reply.Term = rf.currentTerm                                                                                                                                                                                                                                                                                                                                    
+		reply.Success = false                                                                                                                                                                                                                                                                                                                                          
+		return                                                                                                                                                                                                                                                                                                                                                         
+	}    
+
 	// follower's log is too short (doesn't have an entry at PrevLogIndex)
 	if rf.physicalToLogical(len(rf.log)) <= args.PrevLogIndex {
 		reply.XTerm = -1 
@@ -410,6 +437,74 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 }
 
+// example InstallSnapshot RPC handler.
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	// Your code here (3D).
+	rf.mu.Lock()
+
+	// if leader term is less than my term (I'm a follower), reject
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		rf.mu.Unlock()
+		return
+	}
+
+	// update term if leader's term is higher (part of rules for all servers Figure 2 - raft paper)
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.votedFor = -1
+		rf.serverState = follower
+		rf.persist()
+	}
+
+	// if you're receiving append entries, it is from a valid leader. 
+	// Maybe you were a candidate in an election, need to make sure you're a follower because there is a valid leader
+	if rf.serverState != follower {
+		rf.serverState = follower
+	}
+
+	// if we've already snapshotted up to (or beyond) this index, this request is stale
+	if args.LastIncludedIndex <= rf.lastIncludedIndex {
+		reply.Term = args.Term
+		rf.mu.Unlock()
+		return 
+	}
+
+	rf.lastHeartbeat = time.Now() // reset election timer
+
+	// now all info up to and including index is trimmed
+	// Creates a new slice and copy the entries we want to keep. This breaks the reference to the old array.  
+	startIndex := rf.logicalToPhysical(args.LastIncludedIndex) 
+	var newLog []Entry
+	if startIndex < len(rf.log) && rf.log[startIndex].Term == args.LastIncludedTerm {
+		newLog = make([]Entry, len(rf.log[startIndex:]))
+		copy(newLog, rf.log[startIndex:])
+	} else {
+		// Create fresh log with just a placeholder at physical index 0                                                                                                                                                                                                                                                                                                
+      	// This placeholder represents the snapshot's last entry   
+		newLog = []Entry{ {Command: nil, Term: args.LastIncludedTerm} }
+	}
+
+	rf.log = newLog
+
+	rf.lastIncludedIndex = args.LastIncludedIndex
+	rf.commitIndex = args.LastIncludedIndex
+	rf.lastApplied = args.LastIncludedIndex
+	rf.lastIncludedTerm = args.LastIncludedTerm
+	reply.Term = rf.currentTerm
+
+	rf.persistSnapshot(args.Data)
+	rf.mu.Unlock()
+
+	// send snapshot to service via applyCh using ApplyMsg
+	rf.applyCh <- raftapi.ApplyMsg{
+		SnapshotValid: true,
+		Snapshot: args.Data,
+		SnapshotIndex: args.LastIncludedIndex,
+		SnapshotTerm: args.LastIncludedTerm,
+	}
+}
+
 // example code to send a RequestVote RPC to a server.
 // server is the index of the target server in rf.peers[].
 // expects RPC arguments in args.
@@ -444,6 +539,11 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 func (rf *Raft) appendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
+
+func (rf *Raft) installSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
 	return ok
 }
 
@@ -621,7 +721,6 @@ func (rf *Raft) sendHeartBeats() {
 						*/
 						rf.mu.Lock()
 						peerNextIndex := rf.nextIndex[peer] // index of the next log entry to send to that follower server
-						
 						// leader can't send AppendEntries because entries are gone
 						/*
 						Example: Leader snapshotted at index 10 -> so lastIncludedIndex = 10 and log would start at index 10
@@ -630,6 +729,41 @@ func (rf *Raft) sendHeartBeats() {
 						*/
 						if peerNextIndex <= rf.lastIncludedIndex {
 							// TODO: send InstallSnapshot
+							args := &InstallSnapshotArgs{
+								Term: currentTerm,
+								LeaderId: me,
+								LastIncludedIndex: rf.lastIncludedIndex,
+								LastIncludedTerm: rf.lastIncludedTerm,
+								Data: rf.persister.ReadSnapshot(),
+							}
+							reply := &InstallSnapshotReply{}
+							rf.mu.Unlock()
+
+							ok := rf.installSnapshot(peer, args, reply)
+							rf.mu.Lock()
+							if ok {
+								if reply.Term > currentTerm {
+									rf.currentTerm = reply.Term
+									rf.serverState = follower
+									rf.votedFor = -1
+									rf.persist()
+
+									rf.mu.Unlock()
+									return
+								}
+
+								if rf.currentTerm != currentTerm || rf.serverState != leader {
+									rf.mu.Unlock()
+									return
+								}
+
+								rf.nextIndex[peer] = rf.lastIncludedIndex + 1
+								rf.matchIndex[peer] = rf.lastIncludedIndex
+								rf.mu.Unlock()
+								return
+
+							}
+							rf.mu.Unlock()
 							return
 						}
 						if peerNextIndex < rf.physicalToLogical(len(rf.log)) {
@@ -651,7 +785,7 @@ func (rf *Raft) sendHeartBeats() {
 							Entries: entries,
 						}
 						reply := &AppendEntriesReply{}
-						ok := rf.appendEntries(server, args, reply)
+						ok := rf.appendEntries(peer, args, reply)
 						if ok {
 							rf.mu.Lock()
 							if reply.Term > currentTerm {
