@@ -1,0 +1,46 @@
+What is raft? 
+Raft is a replicated state machine consensus algorithm. 
+
+Replicated state machine = system where multiple servers maintain identical copies of a state machine by processing the same sequence of commands in the same order. The key insight is determinism: same inputs → same outputs across all replicas.     
+Consensus algorithm = An algorithm that makes machines agree on a leader and agree on the order of log entries (commands)
+
+For implementation details: view code and Figure 2 for Raft extended paper. 
+
+Raft RPCs:
+1. AppendEntries: leader sends its entries to followers so followers can be up to date - replicate to followers. Leader keeps track of the next index it should send the log for each follower. This RPC is also used to send heartbeats - leader assertance.
+2. RequestVote: a candidate request votes to other machines to see if it wins election. 
+3. InstallSnapshot: When a follower is so far behind that the leader has already compacted the log, the leader sends a snapshot containing the follower’s new base state and last included index/term.
+
+Raft components:
+1. Start() - Function invoked by a service using raft. If the leader receives the message, it will append the entry to its log in memory.
+2. go ticker() - For each server, goroutine that checks when was the last time the server received a valid heartbeat. If a certain time has passed since receiving a heartbeat, leader is stale and start election. 
+               - This function also handles the reply from RequestVote to see if candidate won/lost election.
+3. go sendHeartbeats() - The leader will send AppendEntries every 100ms to all followers. It can either be logs to be replicated, but if a follower is up to date, then leader just sends a heartbeat. 
+                       - If a follower is left behind because leader snapshotted and does not have the missing entries of follower, then send RPC InstallSnapshot()
+                       - This function handles the reply from AppendEntries and InstallSnapshot. It will update nextPeerIndex[] and nextMatchIndex[]. It will also detect if a majority of followers have replicated entries to apply to state machine.
+4. go applyEntries() - Once entries are committed (commitIndex advances), each server applies them in order to its state machine via the apply channel.
+5. Snapshot() - Function invoked by a service using raft. The service is saying "hey, I've saved successfully up to this log entry. You can discard previous logs."
+
+New learnings:
+1. Golang channels and condition variables: 
+   - channel - Go's mechanism for communication between goroutines. In practice, communication between service goroutine and raft goroutine (applyEntries or InstallSnapshot in sendHeartbeats)
+   - condition variable - synchronization primitive that lets goroutines wait for a condition to become true, wihtout busy-waiting (wasting CPU cycles). In practice: the condition variable
+     applyCond is linked to rf.mu (Raft's Mutex). Meaning that when applyCond.Wait() is called, it means that the function calling it will sleep until some condition is met. At the same time, 
+     when applyCond.signal() is called by another function, it will wake up the other function and check the condition again. This is used in applyEntries. The function sleeps waiting for
+     commitIndex > lastApplied. The leader logic (in sendHeartbeats) determines when entries are committed via majority replication and updates commitIndex. When that happens, it signals applyEntries to wake up and apply. 
+
+The distinction between committed vs applied:                                                                                                                                                                                                                                                                                                                      
+  - An entry is committed when the leader knows a majority has replicated it                                                                                                                                                                                                                                                                                         
+  - An entry is applied when it's actually executed on the state machine     
+This is important because commitIndex can advance before entries are applied, and applyEntries() is what bridges that gap.
+
+Command flow:                                                                                                                                                                                                                                                                                                                                  
+  Client → Leader.Start()                                                                                                                                                                                                                                                                                                                                            
+      → Leader appends to local log                                                                                                                                                                                                                                                                                                                                  
+      → Leader sends AppendEntries to followers                                                                                                                                                                                                                                                                                                                      
+      → Followers replicate & respond                                                                                                                                                                                                                                                                                                                                
+      → Leader sees majority → updates commitIndex                                                                                                                                                                                                                                                                                                                   
+      → applyEntries() sends to applyCh                                                                                                                                                                                                                                                                                                                              
+      → Service applies command to state machine
+
+The term acts as a logical clock. It helps detect stale leaders and stale messages. Any RPC with an outdated term is rejected, and any server seeing a higher term immediately steps down. This is how Raft maintains consistency during network partitions.                                                                                                       
