@@ -56,8 +56,8 @@ type Raft struct {
 	serverState			ServerState
 	lastHeartbeat		time.Time				// last time we got a successful heartbeat from a leader
 	electionTimeout		time.Duration			// duration that determines whether an election should start. If time since our lastHearbeat was more than electionTimeout, start election
-	applyCh				chan raftapi.ApplyMsg
-	applyCond			*sync.Cond				// condition variable
+	applyCh				chan raftapi.ApplyMsg   // channel to communicate between Raft goroutine and the service goroutine
+	applyCond			*sync.Cond				// condition variable - sync goroutines in channel
 	lastIncludedIndex 	int						// highest log index (last entry) in the snapshot
 	lastIncludedTerm  	int						// term of last included index
 }
@@ -615,7 +615,8 @@ func (rf *Raft) ticker() {
 		// if time since our last heartbeat > than our election timeout, we should start an election
 		rf.mu.Lock()
 		elapsedTime := time.Since(rf.lastHeartbeat)
-		if elapsedTime > rf.electionTimeout {
+		// detect the absence of a leader (for followers/candidates) - leaders don't need it
+		if elapsedTime > rf.electionTimeout && rf.serverState != leader {
 			rf.serverState = candidate
 			rf.currentTerm += 1
 			rf.votedFor = rf.me // vote for itself
@@ -819,7 +820,7 @@ func (rf *Raft) sendHeartBeats() {
 										}
 									}
 									
-										// Leaders can only commit entries from their current term by counting replicas. This prevents committing old entries from previous terms that might be overwritten.
+									// Leaders can only commit entries from their current term by counting replicas. This prevents committing old entries from previous terms that might be overwritten.
 									if rf.log[rf.logicalToPhysical(N)].Term == rf.currentTerm && count >= (len(rf.peers) / 2) + 1 {
 										rf.commitIndex = N
 										rf.applyCond.Signal() // signal when commit index advances
@@ -862,6 +863,8 @@ func (rf *Raft) sendHeartBeats() {
 
 
 func (rf *Raft) applyEntries() {
+	// closes applyCh when applyEntries returns
+	defer close(rf.applyCh) // when raft gets Killed, we need to close applyCh so that rsm learns about the shutdown and can exit out of all loops (lab 4A)
 	for rf.killed() == false {
 		rf.mu.Lock()
 		
