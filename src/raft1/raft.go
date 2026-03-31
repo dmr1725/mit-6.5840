@@ -60,6 +60,7 @@ type Raft struct {
 	applyCond			*sync.Cond				// condition variable - sync goroutines in channel
 	lastIncludedIndex 	int						// highest log index (last entry) in the snapshot
 	lastIncludedTerm  	int						// term of last included index
+	triggerCh		    chan struct{}			// signals sendHearbeats to send entries immediately after Start() is invoked
 }
 
 
@@ -580,6 +581,14 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		})
 		index = rf.physicalToLogical(len(rf.log) - 1)
 		rf.persist()
+
+		// signal sendHeartBeats to immediately send the new entry to followers
+		select {
+		// try to send a signal into triggerCh. If the  channel is ready (has space), send succeeds
+		// if not, skip and do nothing
+		case rf.triggerCh <- struct{}{}: 
+		default:
+		}
 		return index, term, isLeader
 	}
 
@@ -857,7 +866,11 @@ func (rf *Raft) sendHeartBeats() {
 				}
 			}
 		}
-		time.Sleep(time.Duration(100) * time.Millisecond)
+		// wait for either a signal from triggerCh is sent to act immediately or wait 100ms
+		select {
+		case <-rf.triggerCh:
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
 }
 
@@ -934,6 +947,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitIndex = 0
 	rf.applyCh = applyCh
 	rf.applyCond = sync.NewCond(&rf.mu)
+	rf.triggerCh = make(chan struct{}, 1) // size capacity of 1 buffer
 	rf.lastIncludedIndex = 0
 	rf.lastIncludedTerm = 0
 
