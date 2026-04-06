@@ -38,7 +38,7 @@ func (kv *KVServer) DoOp(req any) any {
 	defer kv.mu.Unlock()
 
 	switch args := req.(type) {
-	case *rpc.GetArgs:
+	case rpc.GetArgs:
 		pair, ok := kv.state[args.Key]
 		reply := rpc.GetReply{}
 		if ok {
@@ -49,7 +49,7 @@ func (kv *KVServer) DoOp(req any) any {
 			reply.Err = rpc.ErrNoKey
 		}
 		return reply
-	case *rpc.PutArgs:
+	case rpc.PutArgs:
 		reply := rpc.PutReply{}
 		key := args.Key
 		value := args.Value
@@ -95,7 +95,7 @@ func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
 	// Your code here. Use kv.rsm.Submit() to submit args
 	// You can use go's type casts to turn the any return value
 	// of Submit() into a GetReply: rep.(rpc.GetReply)
-	err, result := kv.rsm.Submit(args) // result is a GetReply
+	err, result := kv.rsm.Submit(*args) // result is a GetReply
 	if err == rpc.ErrWrongLeader {
 		reply.Err = rpc.ErrWrongLeader
 		return
@@ -107,7 +107,7 @@ func (kv *KVServer) Put(args *rpc.PutArgs, reply *rpc.PutReply) {
 	// Your code here. Use kv.rsm.Submit() to submit args
 	// You can use go's type casts to turn the any return value
 	// of Submit() into a PutReply: rep.(rpc.PutReply)
-	err, result := kv.rsm.Submit(args) // result is a PutReply
+	err, result := kv.rsm.Submit(*args) // result is a PutReply
 	if err == rpc.ErrWrongLeader {
 		reply.Err = rpc.ErrWrongLeader
 		return
