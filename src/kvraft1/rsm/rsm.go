@@ -168,7 +168,7 @@ func (rsm *RSM) RaftChannelReader() {
 			resultCh, ok := rsm.pending[commandIndex]
 			rsm.mu.Unlock()
 			if ok {
-				resultCh <- OpResult{Id: op.Id, Result: result}
+				resultCh <- OpResult{Id: op.Id, Result: result} // wake up line 129
 				rsm.mu.Lock()
 				delete(rsm.pending, commandIndex)
 				rsm.mu.Unlock()
