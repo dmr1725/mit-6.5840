@@ -1,0 +1,77 @@
+EXAMPLE:
+
+Let's say 4 servers (S0=leader, S1/S2/S3=followers), 1 clerk, command: Put("x", "42", ver=0).
+
+Each physical server runs all three stacked together:                                                                                                 
+   
+  S0:  [server.go KVServer] + [rsm.go RSM] + [raft1/raft.go Raft peer]                                                                                  
+  S1:  [server.go KVServer] + [rsm.go RSM] + [raft1/raft.go Raft peer]                                                                                  
+  S2:  [server.go KVServer] + [rsm.go RSM] + [raft1/raft.go Raft peer]                                                                                  
+  S3:  [server.go KVServer] + [rsm.go RSM] + [raft1/raft.go Raft peer]      
+
+                                                                                                                                                                                
+  ---                                                                                                                                                                           
+  Step 1: Clerk → Leader RPC                                                                                                                                                    
+                                                                                                                                                                                
+  Clerk → S0.Put(args={Key:"x", Value:"42", Version:0})                                                                                                                         
+  S0's Put() handler goroutine calls rsm.Submit(PutArgs{...}) and blocks.                                                                                                       
+                                                                                                                                                                                
+  ---                                                                                                                                                                           
+  Step 2: Submit() on S0                                                                                                                                                        
+                                                                                                                                                                                
+  op := Op{Me:0, Id:8675309, Req:PutArgs{Key:"x",Value:"42",Version:0}}
+  ch := make(chan OpResult, 1)                                                                                                                                                  
+                  
+  index=5, term=2, isLeader=true := rf.Start(op)                                                                                                                                
+                  
+  pending[5] = ch   // "wake me up when index 5 commits"                                                                                                                        
+  // now blocks on <-ch
+                                                                                                                                                                                
+  ---             
+  Step 3: Raft replicates                                                                                                                                                       
+                  
+  S0's Raft peer sends AppendEntries RPC to S1, S2, S3's Raft peers (peer-to-peer, bypassing RSM/KVServer entirely). Once majority acknowledge, S0's    
+  Raft marks index 5 committed. Then each Raft peer independently sends to its own local applyCh:                                                       
+                                                                                                                                                        
+  S0's Raft → S0's applyCh
+  S1's Raft → S1's applyCh                                                                                                                              
+  S2's Raft → S2's applyCh
+  S3's Raft → S3's applyCh                                                                                                     
+                                                                                                                                                                                
+  ---                                                                                                                                                                           
+  Step 4: Each server's RaftChannelReader reads its own applyCh                                                                                                                                  
+                                                                                                                                                                                
+  All 4 readers wake up simultaneously:
+                                                                                                                                                                                
+  ┌─────────────┬──────────────────────────────┬─────────────┬──────────────────────────────────────────────────────────────────┐                                               
+  │   Server    │    DoOp(PutArgs{x,42,0})     │ pending[5]? │                              Action                              │
+  ├─────────────┼──────────────────────────────┼─────────────┼──────────────────────────────────────────────────────────────────┤                                               
+  │ S0 (leader) │ sets state["x"]=Pair{42,1} ✓ │ yes, ch     │ sends OpResult{Id:8675309, Result:PutReply{OK}} → wakes Submit() │
+  ├─────────────┼──────────────────────────────┼─────────────┼──────────────────────────────────────────────────────────────────┤
+  │ S1          │ sets state["x"]=Pair{42,1} ✓ │ no          │ discards result                                                  │                                               
+  ├─────────────┼──────────────────────────────┼─────────────┼──────────────────────────────────────────────────────────────────┤
+  │ S2          │ sets state["x"]=Pair{42,1} ✓ │ no          │ discards result                                                  │                                               
+  ├─────────────┼──────────────────────────────┼─────────────┼──────────────────────────────────────────────────────────────────┤                                               
+  │ S3          │ sets state["x"]=Pair{42,1} ✓ │ no          │ discards result                                                  │
+  └─────────────┴──────────────────────────────┴─────────────┴──────────────────────────────────────────────────────────────────┘                                               
+                  
+  All 4 state maps are now identical. That's the replication.                                                                                                                   
+   
+  ---                                                                                                                                                                           
+  Step 5: Submit() unblocks on S0
+
+  case result := <-ch:
+      // result = OpResult{Id:8675309, Result:PutReply{Err:OK}}                                                                                                                 
+      // Id matches → 
+      return rpc.OK, PutReply{Err:OK}                                                                                                                
+                  
+  S0's Put() handler writes *reply = PutReply{OK} and the RPC returns to the Clerk. Done.
+
+Additional Notes                                                                                                                                       
+  Raft-level replication — AppendEntries copies the log to all followers. This is Raft's job. After this, all servers have the same log entries.        
+   
+  State machine replication — each server's RaftChannelReader reads from applyCh and calls DoOp(), which executes the log entry and updates the state   
+  map. This is what makes all state maps identical.                                                                                                   
+                                                                                                                                                        
+  Raft replicates the log. DoOp() replicates the state. Both are necessary — the log is just a record of commands, the state map is the actual key/value
+   data the client cares about.
