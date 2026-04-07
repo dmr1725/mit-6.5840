@@ -55,6 +55,7 @@ type RSM struct {
 	// lookup table: "if anyone is waiting for this index, here's how to wake them up."
 	pending		map[int]chan OpResult // key is an int (index), value is a channel that can send/receive values of type OpResult
 	dead		bool                 // true after applyCh is closed (Raft killed); new Submit() calls must not block
+	persister   *tester.Persister
 }
 
 // servers[] contains the ports of the set of
@@ -79,9 +80,17 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 		applyCh:      make(chan raftapi.ApplyMsg),
 		sm:           sm,
 		pending:	  make(map[int]chan OpResult),
+		persister: 	  persister,
 	}
 	if !useRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
+	}
+
+	// When a server restarts, Raft replays the log from scratch. But if a snapshot exists, we restore the state machine from it first, 
+	// so Raft only needs to replay entries after the snapshot.    
+	data := rsm.persister.ReadSnapshot()
+	if len(data) > 0 {
+		rsm.sm.Restore(data)
 	}
 
 	go rsm.RaftChannelReader()
@@ -157,12 +166,20 @@ func (rsm *RSM) RaftChannelReader() {
 	// range on a channel blocks waiting for the next message, loops forever, and exits the loop automatically when the channel is closed — which is exactly when Raft is killed.
 	// applyCh only closes in rf.applyEntries() (when it exits)
 	for msg := range rsm.applyCh {
-		commandValid := msg.CommandValid
-		if commandValid {
+		if msg.CommandValid {
 			commandIndex := msg.CommandIndex
 			op := msg.Command.(Op)
 
 			result := rsm.sm.DoOp(op.Req)
+			
+			// After every applied command, check if Raft's persisted state is getting too large. If so, ask the state machine for a 
+			// snapshot of its current state (the full key/value map), then hand it to Raft. Raft stores it and discards all log entries 
+			// up to commandIndex.
+			if rsm.maxraftstate != -1 && rsm.rf.PersistBytes() >= rsm.maxraftstate {
+				snapshot := rsm.sm.Snapshot()
+				rsm.rf.Snapshot(commandIndex, snapshot)
+			}
+
 
 			rsm.mu.Lock()
 			resultCh, ok := rsm.pending[commandIndex]
@@ -175,7 +192,12 @@ func (rsm *RSM) RaftChannelReader() {
 				delete(rsm.pending, commandIndex)
 				rsm.mu.Unlock()
 			}
+		} else if msg.SnapshotValid {
+			// When a follower is far behind (its log is missing entries the leader already discarded), Raft sends the leader's snapshot 
+			// via applyCh instead of individual log entries. The RSM restores the state machine from it so the follower catches up instantly.
+			rsm.sm.Restore(msg.Snapshot)
 		}
+
 	}
 
 	// When applyCh closes (Raft killed), the above loop exits. Two independent problems to handle:
