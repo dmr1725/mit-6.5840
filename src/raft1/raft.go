@@ -607,7 +607,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	rf.mu.Lock()
 	rf.applyCond.Signal() // signal the condition variable so the applier can exit
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) killed() bool {
