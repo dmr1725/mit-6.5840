@@ -11,10 +11,11 @@ type Clerk struct {
 	clnt    *tester.Clnt
 	servers []string
 	// You will have to modify this struct.
+	leader  int
 }
 
 func MakeClerk(clnt *tester.Clnt, servers []string) kvtest.IKVClerk {
-	ck := &Clerk{clnt: clnt, servers: servers}
+	ck := &Clerk{clnt: clnt, servers: servers, leader: 0}
 	// You'll have to add code here.
 	return ck
 }
@@ -32,7 +33,23 @@ func MakeClerk(clnt *tester.Clnt, servers []string) kvtest.IKVClerk {
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 
 	// You will have to modify this function.
-	return "", 0, ""
+	args := rpc.GetArgs{
+		Key: key,
+	}
+	reply := rpc.GetReply{}
+
+	for {
+		ok := ck.clnt.Call(ck.servers[ck.leader], "KVServer.Get", &args, &reply)
+		if ok && reply.Err != rpc.ErrWrongLeader {
+			if reply.Err == rpc.ErrNoKey {
+				return "", 0, rpc.ErrNoKey
+			}
+
+			return reply.Value, reply.Version, reply.Err
+		}
+
+		ck.leader = (ck.leader + 1) % len(ck.servers)
+	}
 }
 
 // Put updates key with value only if the version in the
@@ -54,5 +71,34 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 	// You will have to modify this function.
-	return ""
+	args := rpc.PutArgs{
+		Key: key, 
+		Value: value, 
+		Version: version,
+	}
+	reply := rpc.PutReply{}
+
+	firstTry := true
+
+	for {
+		ok := ck.clnt.Call(ck.servers[ck.leader], "KVServer.Put", &args, &reply)
+		if ok  && reply.Err != rpc.ErrWrongLeader {
+			if reply.Err == rpc.OK {
+				return reply.Err
+			}
+
+			if reply.Err == rpc.ErrVersion {
+				if firstTry {
+					return reply.Err
+				}
+
+				return rpc.ErrMaybe
+			}
+
+			return reply.Err
+		}
+		firstTry = false
+		ck.leader = (ck.leader + 1) % len(ck.servers)
+
+	}
 }
