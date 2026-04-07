@@ -167,6 +167,8 @@ func (rsm *RSM) RaftChannelReader() {
 			rsm.mu.Lock()
 			resultCh, ok := rsm.pending[commandIndex]
 			rsm.mu.Unlock()
+			// only a leader will have a pending channel
+			// if this rsm.go is a follower, only DoOp executes and the following if won't execute
 			if ok {
 				resultCh <- OpResult{Id: op.Id, Result: result} // wake up line 129
 				rsm.mu.Lock()
